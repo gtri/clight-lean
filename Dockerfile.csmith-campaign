@@ -1,0 +1,131 @@
+# syntax=docker/dockerfile:1
+#
+# Reproducible CSmith differential-testing campaign image.
+#
+# Build with tools/build-csmith-campaign-image.sh. The Dockerfile fetches
+# public CompCert and CSmith commits by full object ID, then applies the
+# committed Lean-clightgen patch to the public CompCert source before building.
+
+FROM ubuntu@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+
+ARG DEBIAN_FRONTEND=noninteractive
+# Passed by tools/build-csmith-campaign-image.sh, which owns the pin; the
+# exported .campaign-source-rev is validated against this value below.
+ARG CLIGHT_LEAN_REV
+ARG COMPCERT_REPO=https://github.com/AbsInt/CompCert.git
+ARG COMPCERT_REV=96e66b844a839464d90c6e14bb97a4198832b50b
+ARG COMPCERT_PATCH=patches/compcert-lean-clightgen.patch
+ARG COMPCERT_PATCH_SHA256=f780d18c90109551a4487606b168046120323229a1ebd65219cb36f2d8b56707
+ARG CSMITH_REPO=https://github.com/csmith-project/csmith.git
+ARG CSMITH_REV=0cdc710315cfee9035e22ef4363ca479270d1934
+ARG ELAN_VERSION=4.2.1
+ARG ELAN_X86_64_LINUX_SHA256=4e717523217af592fa2d7b9c479410a31816c065d66ccbf0c2149337cfec0f5c
+ARG COMPCERT_BUILD_JOBS=2
+ARG CSMITH_BUILD_JOBS=2
+
+ENV TZ=Etc/UTC \
+    ELAN_HOME=/opt/elan \
+    PATH=/opt/elan/bin:/opt/csmith/bin:${PATH} \
+    CSMITH_BIN=/opt/csmith/bin/csmith \
+    CSMITH_RUNTIME_INCLUDE=/opt/csmith/include \
+    CSMITH_CAMPAIGN_ROOT=/campaign \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash \
+      build-essential \
+      ca-certificates \
+      cmake \
+      coq \
+      coreutils \
+      curl \
+      git \
+      libgmp-dev \
+      libmenhir-ocaml-dev \
+      m4 \
+      menhir \
+      ocaml \
+      ocaml-findlib \
+      python3 \
+      python3-venv \
+      xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Lean is independently pinned by the copied repository's lean-toolchain. Elan
+# itself is downloaded from a versioned release and verified by SHA-256.
+RUN curl --fail --location --retry 3 --silent --show-error \
+      -o /tmp/elan.tar.gz \
+      "https://github.com/leanprover/elan/releases/download/v${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz" \
+    && echo "${ELAN_X86_64_LINUX_SHA256}  /tmp/elan.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/elan.tar.gz -C /tmp \
+    && ELAN_HOME="${ELAN_HOME}" /tmp/elan-init -y --no-modify-path \
+    && rm -f /tmp/elan.tar.gz /tmp/elan-init \
+    && elan toolchain install leanprover/lean4:v4.34.0 \
+    && elan default leanprover/lean4:v4.34.0 \
+    && lean --version \
+    && lake --version
+
+WORKDIR /campaign
+COPY . /campaign/CLight-Lean
+
+RUN test "$(cat /campaign/CLight-Lean/.campaign-source-rev)" = "${CLIGHT_LEAN_REV}" \
+    && test "$(sha256sum /campaign/CLight-Lean/${COMPCERT_PATCH} | cut -d ' ' -f1)" = "${COMPCERT_PATCH_SHA256}" \
+    && git init /campaign/CompCert \
+    && git -C /campaign/CompCert remote add origin "${COMPCERT_REPO}" \
+    && git -C /campaign/CompCert fetch --depth 1 origin "${COMPCERT_REV}" \
+    && git -C /campaign/CompCert checkout --detach FETCH_HEAD \
+    && test "$(git -C /campaign/CompCert rev-parse HEAD)" = "${COMPCERT_REV}" \
+    && git -C /campaign/CompCert apply --check "/campaign/CLight-Lean/${COMPCERT_PATCH}" \
+    && git -C /campaign/CompCert apply "/campaign/CLight-Lean/${COMPCERT_PATCH}" \
+    && git -C /campaign/CompCert diff --check \
+    && git init /campaign/csmith \
+    && git -C /campaign/csmith remote add origin "${CSMITH_REPO}" \
+    && git -C /campaign/csmith fetch --depth 1 origin "${CSMITH_REV}" \
+    && git -C /campaign/csmith checkout --detach FETCH_HEAD \
+    && test "$(git -C /campaign/csmith rev-parse HEAD)" = "${CSMITH_REV}"
+
+# CompCert is built from the patched public checkout with the Ubuntu 24.04 Coq
+# 8.18 toolchain (accepted by its configure script), local Flocq/MenhirLib,
+# and explicit x86-64 Linux + clightgen configuration.
+WORKDIR /campaign/CompCert
+RUN ./configure -clightgen x86_64-linux \
+    && make -j"${COMPCERT_BUILD_JOBS}" \
+    && test -x /campaign/CompCert/ccomp \
+    && test -x /campaign/CompCert/clightgen \
+    && /campaign/CompCert/ccomp -version \
+    && /campaign/CompCert/clightgen -version
+
+# Build CSmith locally, install it under /opt/csmith, and use that installed
+# immutable header tree as the corpus runtime include directory. Building the
+# `headers` target ensures safe_math*.h matches the pinned generator revision.
+RUN cmake -S /campaign/csmith -B /tmp/csmith-build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/opt/csmith \
+        # `cmake --install` installs CSmith's runtime libraries as well as its
+    # generated headers.  Build the default target graph, not only `csmith`
+    # and `headers`, so libcsmith.a/libcsmith.so exist for that install step.
+    && cmake --build /tmp/csmith-build -j"${CSMITH_BUILD_JOBS}" \
+    && cmake --install /tmp/csmith-build \
+    && test -x /opt/csmith/bin/csmith \
+    && test -f /opt/csmith/include/csmith.h \
+    && test -f /opt/csmith/include/safe_math.h \
+    && /opt/csmith/bin/csmith --version
+
+# The source harness expects the owned fixed checksum declaration/implementation
+# in the CLight-Lean checkout. Lake downloads the revisions recorded in the
+# committed manifest, then compiles its dependencies once for campaign reuse.
+WORKDIR /campaign/CLight-Lean
+RUN lake build CLightLean.Exec.CSmithIO \
+    && python3 -m py_compile tools/csmith_diff.py tools/csmith_corpus.py \
+    && python3 tools/csmith_diff.py --self-test-envelope \
+    && python3 tools/csmith_corpus.py --self-test-transform
+
+# Persistent output roots should be bind-mounted for a long campaign.  The
+# entrypoint intentionally does no cleanup and forwards all corpus arguments.
+VOLUME ["/campaign/CLight-Lean/artifacts/csmith", "/campaign/CLight-Lean/GeneratedCases", "/campaign/CLight-Lean/.csmith-diff-build"]
+
+COPY tools/run-csmith-corpus-container.sh /usr/local/bin/run-csmith-corpus
+RUN chmod 0755 /usr/local/bin/run-csmith-corpus
+
+WORKDIR /campaign/CLight-Lean
+ENTRYPOINT ["/usr/local/bin/run-csmith-corpus"]

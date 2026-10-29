@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "profile": "fixed-checksum-floats-v1",
+  "scope": "This matrix describes source features produced by the CSmith generator options. The fixed CSmith checksum runtime and clightgen output also contribute already-admitted support globals such as string literals and crc32_tab.",
+  "feature_families": [
+    {
+      "family": "scalar_global_variables",
+      "relational_semantics": "supported",
+      "functional_executor": "supported",
+      "correspondence": "whole-program initialization, global lvalue lookup, assignment, and CSmith runs have soundness theorems",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/global_checksum.c",
+        "Test/CSmithSeeds/GlobalChecksumGenerated.lean",
+        "Test/Exec/CSmithGlobalProgramTest.lean"
+      ],
+      "limits": "Beyond scalar globals, arrays, pointers, int8, uint8, bounded structs and unions, long long, and floating point are separately enabled below; volatile accesses remain disabled. Runtime support globals are outside this generator-option classification."
+    },
+    {
+      "family": "arrays",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for global array initialization, array-to-pointer decay, indexed loads, and indexed stores",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/array_checksum.c",
+        "Test/CSmithSeeds/ArrayChecksumGenerated.lean",
+        "Test/Exec/CSmithArrayProgramTest.lean"
+      ],
+      "limits": "The profile pins --max-array-dim 3 and --max-array-len-per-dim 4. The isolated GeneratedCases Lean library uses maxRecDepth 4096 because array-heavy exports can exceed Lean's default elaboration recursion depth; maxHeartbeats remains unchanged. Pointer generation is separately bounded below. The profile passes CSmith --no-hash-value-printf so array checksum traversal does not emit unsupported diagnostic printf calls."
+    },
+    {
+      "family": "pointers",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for pointer-valued global initialization, address-of, dereference, pointer arguments, and scalar loads/stores through pointers",
+      "correspondence": "expression, assignment, function-entry, control-step, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/pointer_checksum.c",
+        "Test/CSmithSeeds/PointerChecksumGenerated.lean",
+        "Test/Exec/CSmithPointerProgramTest.lean",
+        "Test/CSmithSeeds/pointer_call_checksum.c",
+        "Test/CSmithSeeds/PointerCallChecksumGenerated.lean",
+        "Test/Exec/CSmithPointerCallProgramTest.lean",
+        "Test/CSmithSeeds/pointer_compare_checksum.c",
+        "Test/CSmithSeeds/PointerCompareChecksumGenerated.lean",
+        "Test/Exec/CSmithPointerCompareProgramTest.lean",
+        "Test/CSmithSeeds/pointer_depth3_checksum.c",
+        "Test/CSmithSeeds/PointerDepth3ChecksumGenerated.lean",
+        "Test/Exec/CSmithPointerDepth3ProgramTest.lean"
+      ],
+      "limits": "The profile pins --max-pointer-depth 3 and disables volatile and const pointer qualifiers. The focused fixtures cover global Init_addrof chains through three levels, triple dereference read-modify-write, same-array ordering, pointer equality/inequality, and null comparison. Structs and unions remain disabled; comparisons across unrelated non-null object blocks are not an admitted use."
+    },
+    {
+      "family": "structs",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for composite layout, initialized struct globals, field lvalues, field loads/stores, and aggregate By_copy assignment",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/struct_field_checksum.c",
+        "Test/CSmithSeeds/StructFieldChecksumGenerated.lean",
+        "Test/Exec/CSmithStructFieldProgramTest.lean",
+        "Test/CSmithSeeds/struct_copy_checksum.c",
+        "Test/CSmithSeeds/StructCopyChecksumGenerated.lean",
+        "Test/Exec/CSmithStructCopyProgramTest.lean"
+      ],
+      "limits": "The profile pins --max-struct-fields 6, --no-packed-struct, --no-arg-structs, and --no-return-structs because the pinned CompCert target does not admit struct parameters or returns without its unsupported -fstruct-passing option. Bitfields remain disabled; unions are separately enabled below. Arrays and bounded pointers remain enabled to exercise ordinary struct interactions."
+    },
+    {
+      "family": "unions",
+      "relational_semantics": "supported for member layout and aggregate copy",
+      "functional_executor": "supported for active-member field reads/writes and aggregate By_copy assignment",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/union_field_checksum.c",
+        "Test/CSmithSeeds/UnionFieldChecksumGenerated.lean",
+        "Test/Exec/CSmithUnionFieldProgramTest.lean",
+        "Test/CSmithSeeds/union_copy_checksum.c",
+        "Test/CSmithSeeds/UnionCopyChecksumGenerated.lean",
+        "Test/Exec/CSmithUnionCopyProgramTest.lean"
+      ],
+      "limits": "The profile pins --max-union-fields 3, --no-arg-unions, --no-return-unions, and --take-no-union-field-addr. The current CSmith version can still emit union-valued function boundaries despite its no-arg/no-return flags; the transformer retains and classifies those target-ABI-incompatible sources before CompCert compilation. Bitfields remain disabled. Focused fixtures use only the initialized or last-written active member; inactive-member reads are not an admitted deterministic subset."
+    },
+    {
+      "family": "uint8",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for Mint8unsigned initialization, load, narrowing store, and zero-extension",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/uint8_checksum.c",
+        "Test/CSmithSeeds/Uint8ChecksumGenerated.lean",
+        "Test/Exec/CSmithUint8ProgramTest.lean"
+      ],
+      "limits": "The initial fixture validates unsigned 8-bit wraparound through explicit narrowing and zero-extension to the checksum helper. Signed int8 is separately enabled below."
+    },
+    {
+      "family": "int8",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for Mint8signed initialization, load, narrowing store, and sign extension",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/int8_checksum.c",
+        "Test/CSmithSeeds/Int8ChecksumGenerated.lean",
+        "Test/Exec/CSmithInt8ProgramTest.lean"
+      ],
+      "limits": "The fixture uses a representable signed result (-5) and validates sign extension. The CSmith safe-math profile remains responsible for avoiding undefined signed-overflow expressions in generated programs."
+    },
+    {
+      "family": "multiplication_and_division",
+      "relational_semantics": "supported",
+      "functional_executor": "supported through Omul and Odiv",
+      "correspondence": "expression and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/muldiv_checksum.c",
+        "Test/CSmithSeeds/MuldivChecksumGenerated.lean",
+        "Test/Exec/CSmithMuldivProgramTest.lean"
+      ],
+      "limits": "The fixture uses a nonzero unsigned divisor. Generated programs retain CSmith safe-math wrappers, which guard division and arithmetic corner cases."
+    },
+    {
+      "family": "longlong_and_math64",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for Vlong/Mint64 initialization, 64-bit arithmetic, signed and unsigned division, and narrowing casts",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/uint64_checksum.c",
+        "Test/CSmithSeeds/Uint64ChecksumGenerated.lean",
+        "Test/Exec/CSmithUint64ProgramTest.lean",
+        "Test/CSmithSeeds/int64_checksum.c",
+        "Test/CSmithSeeds/Int64ChecksumGenerated.lean",
+        "Test/Exec/CSmithInt64ProgramTest.lean"
+      ],
+      "limits": "CSmith requires both --longlong and --math64 for its allow_int64 gate; both are enabled by removing their disabling flags. The fixed checksum external remains uint32, so fixtures explicitly cast Vlong results to unsigned int rather than requiring source-level %llx varargs."
+    },
+    {
+      "family": "jumps_and_labels",
+      "relational_semantics": "supported",
+      "functional_executor": "supported through deterministic Sgoto/Slabel control transitions and find_label",
+      "correspondence": "control-step and whole-run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/goto_checksum.c",
+        "Test/CSmithSeeds/GotoChecksumGenerated.lean",
+        "Test/Exec/CSmithGotoProgramTest.lean"
+      ],
+      "limits": "The fixture exercises a forward goto. Source-level assignment/sequence operators are separately enabled below after validating their frontend normalization."
+    },
+    {
+      "family": "frontend_normalized_assignment_and_sequence_operators",
+      "relational_semantics": "supported after CompCert frontend normalization",
+      "functional_executor": "supported through the ordinary lowered Sassign, Sset, Ebinop, Ecast, Evar, and control transitions",
+      "correspondence": "the executor correspondence surface applies to the Clight AST exported after frontend normalization",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/operators_checksum.c",
+        "Test/CSmithSeeds/OperatorsChecksumGenerated.lean",
+        "Test/Exec/CSmithOperatorsProgramTest.lean"
+      ],
+      "limits": "The profile admits compound assignments, embedded assignments, comma operators, unary plus, and pre/post increment/decrement. The source fixture confirms clightgen lowers these to already-supported Clight forms rather than requiring new executor expression constructors."
+    },
+    {
+      "family": "const_qualified_data",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for initialized readonly globals and scalar loads",
+      "correspondence": "whole-program initialization, expression, and CSmith run soundness theorems cover the executed primitives",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/const_checksum.c",
+        "Test/CSmithSeeds/ConstChecksumGenerated.lean",
+        "Test/Exec/CSmithConstProgramTest.lean"
+      ],
+      "limits": "The fixture reads a const-qualified global and does not attempt to write it. The profile still excludes volatiles, builtins, and argc; structs, unions, long long, floating point, and pointers are separately bounded above."
+    },
+    {
+      "family": "floating_point",
+      "relational_semantics": "supported",
+      "functional_executor": "supported for binary32/binary64 initialization, arithmetic, ordered comparisons, casts, and the CSmith safe-wrapper fabs/fabsf calls",
+      "correspondence": "expression, assignment, program initialization, and CSmith run soundness theorems cover executed internal primitives; owned CSmith fabs/fabsf calls have executor-only and specialized relation transition characterizations",
+      "profile_status": "enabled",
+      "coverage": [
+        "Test/CSmithSeeds/float64_checksum.c",
+        "Test/CSmithSeeds/Float64ChecksumGenerated.lean",
+        "Test/Exec/CSmithFloat64ProgramTest.lean",
+        "Test/CSmithSeeds/float32_compare_checksum.c",
+        "Test/CSmithSeeds/Float32CompareGenerated.lean",
+        "Test/Exec/CSmithFloat32CompareProgramTest.lean",
+        "Test/Exec/FloatComparisonTest.lean",
+        "Test/Exec/CSmithStepTest.lean"
+      ],
+      "limits": "The profile uses --float --strict-float. CSmith safe floating wrappers call only exact non-vararg fabs/fabsf ABIs, which the restricted executor owns; native builds link libm. General math-library externals, C source varargs, NaN payload/exception observability, and volatile floating accesses are outside this profile."
+    },
+    {
+      "family": "volatile_accesses",
+      "relational_semantics": "supported",
+      "functional_executor": "not admitted by the corpus profile",
+      "correspondence": "not assessed for profile expansion",
+      "profile_status": "disabled"
+    },
+    {
+      "family": "general_c_varargs_and_libc_externals",
+      "relational_semantics": "opaque external semantics",
+      "functional_executor": "not supported",
+      "correspondence": "outside the concrete checksum specialization",
+      "profile_status": "disabled"
+    }
+  ]
+}

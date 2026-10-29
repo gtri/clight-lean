@@ -1,0 +1,43 @@
+add_1_2 0x4008000000000000
+sub_1_2 0xbff0000000000000
+mul_3_3 0x4022000000000000
+div_1_3 0x3fd5555555555555
+add_eps 0x3ff0000000000000
+neg_pz 0x8000000000000000
+abs_nz 0x0000000000000000
+abs_m3 0x4008000000000000
+eq_pz_nz 1
+ne_nan_nan 1
+eq_nan_nan 0
+le_nan_1 0
+ge_nan_1 0
+lt_1_2 1
+gt_1_2 0
+le_pz_nz 1
+of_int_m1 0xbff0000000000000
+of_intu_ffffffff 0x41efffffffe00000
+of_long_2p53p1 0x4340000000000000
+of_longu_max 0x43f0000000000000
+of_int_f32_16777217 0x4b800000
+to_single_1e40 0x7f800000
+to_single_third 0x3eaaaaab
+of_single_third 0x3fd5555560000000
+to_int_m2p5 some -2
+to_int_max_frac some 2147483647
+to_int_2p31 none
+to_int_min_frac some -2147483648
+to_int_min_m1 none
+to_int_nan none
+to_int_inf none
+to_intu_m0p9 some 0
+to_intu_m1 none
+to_intu_max_frac some 4294967295
+to_intu_2p32 none
+to_long_m2p5 some -2
+to_long_2p63 none
+to_long_m2p63 some -9223372036854775808
+to_longu_2p64 none
+to_longu_2p63 some 9223372036854775808
+to_longu_m0p5 some 0
+zero 0x0000000000000000
+one 0x3ff0000000000000

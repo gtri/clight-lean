@@ -1,0 +1,834 @@
+diff --git a/export/ExportBaseLean.ml b/export/ExportBaseLean.ml
+new file mode 100644
+index 0000000000000000000000000000000000000000..be761c3ad52c15b9f5536be938851fb6a144075a
+--- /dev/null
++++ b/export/ExportBaseLean.ml
+@@ -0,0 +1,359 @@
++(* *********************************************************************)
++(*                                                                     *)
++(*              The Compcert verified compiler                         *)
++(*                                                                     *)
++(*  Lean output backend for clightgen (CLight-Lean project)            *)
++(*                                                                     *)
++(*  Mirrors ExportBase.ml, targeting Lean 4 syntax (CLightLean)        *)
++(*  instead of Coq syntax.                                             *)
++(*                                                                     *)
++(* *********************************************************************)
++
++(** Low-level printers shared by [ExportCtypesLean] and [ExportLeanClight]:
++    literals, lists, options, pairs, identifiers, and the pieces of
++    [AST]/[Values] that don't belong to [Ctypes]/[Clight] specifically.
++
++    Mirrors [ExportBase.ml] 1:1 where the Lean and Coq shapes agree;
++    diverges (documented inline) where CLightLean's port genuinely differs
++    from CompCert's Coq types (e.g. [ident] has no [OfNat] instance, several
++    fields are [Nat]/[Int] where Coq uses [Z]/[N]/[positive]/[ptrofs]). *)
++
++open Format
++open Camlcoq
++open AST
++open Values
++
++(* Options, lists, pairs *)
++
++let print_option fn p = function
++  | None -> fprintf p "none"
++  | Some x -> fprintf p "(some %a)" fn x
++
++let print_pair fn1 fn2 p (x1, x2) =
++  fprintf p "@[<hov 1>(%a,@ %a)@]" fn1 x1 fn2 x2
++
++let print_list fn p l =
++  match l with
++  | [] ->
++      fprintf p "[]"
++  | hd :: tl ->
++      fprintf p "@[<hov 1>[";
++      fn p hd;
++      List.iter (fun x -> fprintf p ",@ %a" fn x) tl;
++      fprintf p "]@]"
++
++(* Numbers.
++
++   Unlike Coq's exporter, there is no [%positive]/[%N]/[%Z] suffix
++   notation on the Lean side: every integer-like field in this port is a
++   plain [Nat] or [Int], so we always emit a bare (possibly parenthesized,
++   for negatives) numeral, ascribed to the expected type only where Lean
++   cannot otherwise infer it (see [ident] below). *)
++
++let coqint p n =
++  let n = camlint_of_coqint n in
++  if n >= 0l
++  then fprintf p "(CompCert.Int.repr %ld)" n
++  else fprintf p "(CompCert.Int.repr (%ld))" n
++
++let coqint64 p n =
++  let n = camlint64_of_coqint n in
++  if n >= 0L
++  then fprintf p "(CompCert.Int64.repr %Ld)" n
++  else fprintf p "(CompCert.Int64.repr (%Ld))" n
++
++(* Float literals are emitted as their exact IEEE bit pattern through
++   CLightLean's [CompCert.Float64.of_bits] / [CompCert.Float32.of_bits]
++   (see `CLightLean/Lib/Floats.lean`), which wrap FloatLib's binary64 /
++   binary32 [ofBits64] / [ofBits32]. The bit pattern is transported exactly,
++   including NaN payloads, so the literal denotes the same value CompCert
++   compiled. *)
++
++let coqfloat p n =
++  fprintf p "(CompCert.Float64.of_bits %a)" coqint64 (Floats.Float.to_bits n)
++
++let coqsingle p n =
++  fprintf p "(CompCert.Float32.of_bits %a)" coqint (Floats.Float32.to_bits n)
++
++let coqZ p n =
++  if Z.ge n Z.zero
++  then fprintf p "%s" (Z.to_string n)
++  else fprintf p "(%s)" (Z.to_string n)
++
++(* Coq strings.  Lean's string-escaping rules agree with Coq's for the
++   common case (backslash and double-quote); [coqstring]'s job here is
++   just to wrap in double quotes exactly as the Coq exporter does. *)
++
++let coqstring p s =
++  fprintf p "\"%s\"" s
++
++(* Identifiers.
++
++   [ident] in CLightLean is a plain [Nat] (`def ident := Nat`), not Coq's
++   [positive]. There is no [OfNat ident] instance, so a bare numeral like
++   `42` does not elaborate at type [ident] — every literal must be
++   ascribed, `(42 : Nat)`, which unifies with [ident] by unfolding.
++
++   Unlike Coq's exporter, there is no canonical/short-idents distinction
++   to make (that machinery exists in Coq purely to let two compilation
++   units agree on the same [positive] for the same source name via
++   [$"name"] notation; our idents have no such cross-file identity
++   concern). We keep the same *readability* mechanism as Coq's
++   [define_idents], though: every named/temporary identifier gets a
++   [def _name : ident := (N : Nat)] binding emitted once up front (see
++   [define_idents] below), and all later uses reference that binding
++   rather than the bare literal. *)
++
++exception Not_an_identifier
++
++let sanitize_char = function
++  | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' as c -> c
++  | ' ' | '$' -> '_'
++  | _ -> raise Not_an_identifier
++
++(* Lean keywords that a sanitized source name could otherwise collide
++   with (Coq's reserved-word set differs from Lean's, so this list is
++   maintained independently rather than reused). Not exhaustive of every
++   Lean keyword, but covers the ones a C identifier could plausibly
++   produce after [sanitize_char]. *)
++let lean_keywords =
++  [ "def"; "theorem"; "lemma"; "example"; "instance"; "structure";
++    "inductive"; "class"; "namespace"; "section"; "end"; "variable";
++    "variables"; "open"; "import"; "match"; "with"; "fun"; "let"; "in";
++    "do"; "by"; "have"; "show"; "from"; "then"; "else"; "if"; "where";
++    "deriving"; "mutual"; "macro"; "syntax"; "notation"; "abbrev";
++    "axiom"; "constant"; "universe"; "set_option"; "attribute";
++    "extends"; "renaming"; "hiding"; "sorry"; "true"; "false"; "Type";
++    "Prop"; "Sort" ]
++
++let sanitize s =
++  if s <> "" then begin
++    let s' = "_" ^ String.map sanitize_char s in
++    if List.mem s' lean_keywords then s' ^ "_" else s'
++  end else "empty_ident"
++
++let temp_names : (ident, string) Hashtbl.t = Hashtbl.create 17
++
++(* Arbitrary-precision printer for a raw [positive], type-ascribed to
++   [Nat]. Deliberately does NOT go through [P.to_int32]/[Int32]: with
++   [Camlcoq.use_canonical_atoms] on (the default, set by [ExportDriver]),
++   an identifier's underlying [positive] is a Huffman-encoded bit-pattern
++   of its *name string*, not a small sequential counter -- for anything
++   beyond a few characters this routinely exceeds [int32] range, and
++   [Int32] arithmetic wraps silently rather than erroring, which
++   previously caused multiple genuinely distinct identifiers (e.g. every
++   `__builtin_*` name) to print as the *same* colliding truncated value.
++   [Z.to_string] (used by Coq's own exporter for exactly this field, via
++   [ExportBase.ml]'s [positive]) has no such bound. *)
++let positive_nat p id =
++  fprintf p "(%s : Nat)" (Z.to_string (Z.Zpos id))
++
++(* Emits a *reference* to an identifier: either the readable [def] name
++   registered by [define_idents]/[name_temporary], or (if unnameable) a
++   raw, type-ascribed [Nat] literal. *)
++let ident p id =
++  try
++    let s = Hashtbl.find string_of_atom id in
++    fprintf p "%s" (sanitize s)
++  with Not_found | Not_an_identifier ->
++  try
++    let s = Hashtbl.find temp_names id in
++    fprintf p "%s" s
++  with Not_found ->
++    positive_nat p id
++
++let iter_hashtbl_sorted (h: ('a, string) Hashtbl.t) (f: 'a * string -> unit) =
++  List.iter f
++    (List.fast_sort (fun (_k1, d1) (_k2, d2) -> String.compare d1 d2)
++      (Hashtbl.fold (fun k d accu -> (k, d) :: accu) h []))
++
++(* Emits the [def _name : ident := (N : Nat)] prologue block, once, for
++   every named/temporary identifier used in the program -- the Lean
++   analogue of Coq's [define_idents]. *)
++let define_idents p =
++  iter_hashtbl_sorted
++    string_of_atom
++    (fun (id, name) ->
++      try
++        let sname = sanitize name in
++        fprintf p "def %s : ident := %a@ " sname positive_nat id
++      with Not_an_identifier -> ());
++  iter_hashtbl_sorted
++    temp_names
++    (fun (id, name) ->
++      fprintf p "def %s : ident := %a@ " name positive_nat id);
++  fprintf p "@ "
++
++let name_temporary t =
++  if not (Hashtbl.mem string_of_atom t) && not (Hashtbl.mem temp_names t)
++  then begin
++    let t0 = first_unused_ident () in
++    let d = Z.succ (Z.sub (Z.Zpos t) (Z.Zpos t0)) in
++    Hashtbl.add temp_names t ("_t'" ^ Z.to_string d)
++  end
++
++let name_opt_temporary = function
++  | None -> ()
++  | Some id -> name_temporary id
++
++(* AST.typ / AST.xtype.
++
++   These are two genuinely different CompCert types (not a Coq-vs-Lean
++   divergence): [signature]'s [sig_args]/[sig_res] are [xtype] in *both*
++   Coq (`common/AST.v`'s `Record signature := mksignature { sig_args:
++   list xtype; ... }`) and this Lean port (`AST.lean`'s `structure
++   signature`), while [EF_annot]/[EF_annot_val]/[EF_debug]'s
++   [targs]/[targ] fields are plain [typ] in both. No translation logic is
++   needed for either -- just the ordinary 1:1 constructor-name mirror,
++   same as every other enum-shaped printer here. *)
++
++let asttype p t =
++  fprintf p "%s"
++     (match t with
++      | AST.Tint -> "typ.Tint"
++      | AST.Tfloat -> "typ.Tfloat"
++      | AST.Tlong -> "typ.Tlong"
++      | AST.Tsingle -> "typ.Tsingle"
++      | AST.Tany32 -> "typ.Tany32"
++      | AST.Tany64 -> "typ.Tany64")
++
++let astxtype p t =
++  fprintf p "%s"
++     (match t with
++      | AST.Xbool -> "xtype.Xbool"
++      | AST.Xint8signed -> "xtype.Xint8signed"
++      | AST.Xint8unsigned -> "xtype.Xint8unsigned"
++      | AST.Xint16signed -> "xtype.Xint16signed"
++      | AST.Xint16unsigned -> "xtype.Xint16unsigned"
++      | AST.Xint -> "xtype.Xint"
++      | AST.Xfloat -> "xtype.Xfloat"
++      | AST.Xlong -> "xtype.Xlong"
++      | AST.Xsingle -> "xtype.Xsingle"
++      | AST.Xptr -> "xtype.Xptr"
++      | AST.Xany32 -> "xtype.Xany32"
++      | AST.Xany64 -> "xtype.Xany64"
++      | AST.Xvoid -> "xtype.Xvoid")
++
++let name_of_chunk = function
++  | Mbool -> "memory_chunk.Mbool"
++  | Mint8signed -> "memory_chunk.Mint8signed"
++  | Mint8unsigned -> "memory_chunk.Mint8unsigned"
++  | Mint16signed -> "memory_chunk.Mint16signed"
++  | Mint16unsigned -> "memory_chunk.Mint16unsigned"
++  | Mint32 -> "memory_chunk.Mint32"
++  | Mint64 -> "memory_chunk.Mint64"
++  | Mfloat32 -> "memory_chunk.Mfloat32"
++  | Mfloat64 -> "memory_chunk.Mfloat64"
++  | Many32 -> "memory_chunk.Many32"
++  | Many64 -> "memory_chunk.Many64"
++
++(* calling_convention.
++
++   Real divergence (not a suffix formality): CLightLean's [cc_vararg] is
++   [Option Nat] (`AST.lean`'s `structure calling_convention`, with an
++   explicit WARNING comment noting the divergence), whereas Coq's is
++   [option Z]. Emit a plain [Nat] (never [(coqZ ...)] / never a [%Z]
++   suffix) -- [cc_vararg] is a fixed-argument *count*, always
++   non-negative in practice, so a bare [Z.to_string] is safe here (unlike
++   the general-purpose [coqZ], which must handle negatives). *)
++
++let print_natZ p (n : Z.t) = fprintf p "%s" (Z.to_string n)
++
++let callconv p cc =
++  if cc = cc_default
++  then fprintf p "cc_default"
++  else fprintf p "{ cc_vararg := %a, cc_unproto := %b, cc_structret := %b }"
++                  (print_option print_natZ) cc.cc_vararg cc.cc_unproto cc.cc_structret
++
++let signatur p sg =
++  fprintf p "@[<hov 2>{ sig_args := %a,@ sig_res := %a,@ sig_cc := %a }@]"
++     (print_list astxtype) sg.sig_args
++     astxtype sg.sig_res
++     callconv sg.sig_cc
++
++let external_function p = function
++  | EF_external(name, sg) ->
++      fprintf p "@[<hov 2>(external_function.EF_external %a@ %a)@]" coqstring name signatur sg
++  | EF_builtin(name, sg) ->
++      fprintf p "@[<hov 2>(external_function.EF_builtin %a@ %a)@]" coqstring name signatur sg
++  | EF_runtime(name, sg) ->
++      fprintf p "@[<hov 2>(external_function.EF_runtime %a@ %a)@]" coqstring name signatur sg
++  | EF_vload chunk ->
++      fprintf p "(external_function.EF_vload %s)" (name_of_chunk chunk)
++  | EF_vstore chunk ->
++      fprintf p "(external_function.EF_vstore %s)" (name_of_chunk chunk)
++  | EF_malloc -> fprintf p "external_function.EF_malloc"
++  | EF_free -> fprintf p "external_function.EF_free"
++  | EF_memcpy(sz, al) ->
++      fprintf p "(external_function.EF_memcpy %a %a)" coqZ sz coqZ al
++  | EF_annot(kind, text, targs) ->
++      fprintf p "(external_function.EF_annot %a %a %a)"
++                ident kind coqstring text (print_list asttype) targs
++  | EF_annot_val(kind, text, targ) ->
++      fprintf p "(external_function.EF_annot_val %a %a %a)"
++                ident kind coqstring text asttype targ
++  | EF_debug(kind, text, targs) ->
++      fprintf p "(external_function.EF_debug %a %a %a)"
++                ident kind ident text (print_list asttype) targs
++  | EF_inline_asm(text, sg, clob) ->
++      fprintf p "@[<hov 2>(external_function.EF_inline_asm %a@ %a@ %a)@]"
++              coqstring text
++              signatur sg
++              (print_list coqstring) clob
++
++(* Variables *)
++
++(* [init_data.Init_addrof]'s offset is [Int] in this port, not Coq's
++   [ptrofs] -- emit a plain integer, not a `(Ptrofs.repr ...)` wrapper. *)
++let init_data p = function
++  | Init_int8 n -> fprintf p "(init_data.Init_int8 %a)" coqint n
++  | Init_int16 n -> fprintf p "(init_data.Init_int16 %a)" coqint n
++  | Init_int32 n -> fprintf p "(init_data.Init_int32 %a)" coqint n
++  | Init_int64 n -> fprintf p "(init_data.Init_int64 %a)" coqint64 n
++  | Init_float32 n -> fprintf p "(init_data.Init_float32 %a)" coqsingle n
++  | Init_float64 n -> fprintf p "(init_data.Init_float64 %a)" coqfloat n
++  | Init_space n -> fprintf p "(init_data.Init_space %a)" coqZ n
++  | Init_addrof(id,ofs) -> fprintf p "(init_data.Init_addrof %a %a)" ident id coqZ ofs
++
++let print_variable print_info p (id, v) =
++  fprintf p "def v%s : globvar _ := {@ " (sanitize (extern_atom id));
++  fprintf p "  gvar_info := %a,@ " print_info v.gvar_info;
++  fprintf p "  gvar_init := %a,@ " (print_list init_data) v.gvar_init;
++  fprintf p "  gvar_readonly := %b,@ " v.gvar_readonly;
++  fprintf p "  gvar_volatile := %b@ " v.gvar_volatile;
++  fprintf p "}@ @ "
++
++(* Values.
++
++   Kept for parity with [ExportBase.ml] even though nothing in the
++   [program_type]/[function]/[expr]/[statement] AST needs a runtime
++   [val] literal today -- mirrors the Coq exporter's own unused-outside-
++   this-module [val_] helper. *)
++let val_ p = function
++  | Vundef -> fprintf p "Vundef"
++  | Vint i -> fprintf p "(Vint %a)" coqint i
++  | Vlong l -> fprintf p "(Vlong %a)" coqint64 l
++  | Vfloat f -> fprintf p "(Vfloat %a)" coqfloat f
++  | Vsingle s -> fprintf p "(Vsingle %a)" coqsingle s
++  | Vptr(b, o) -> fprintf p "(Vptr %a %a)" positive_nat b coqZ o
++
++(* Information about this run of clightgen (provenance / debugging only,
++   not consumed by anything downstream -- mirrors [print_gen_info]). *)
++
++let print_gen_info ~sourcefile ?normalized ?archi p =
++  fprintf p "@[<v 0>-- clightgen (Lean backend) run information:";
++  fprintf p "@ --   version: %s" Version.version;
++  fprintf p "@ --   build:   %s (%s, %s)" Version.buildnr Version.tag Version.branch;
++  fprintf p "@ --   arch:    %s (%s, %s)" Configuration.arch Configuration.model Configuration.abi;
++  fprintf p "@ --   bitsize: %d" (if Archi.ptr64 then 64 else 32);
++  fprintf p "@ --   endian:  %s" (if Archi.big_endian then "big" else "little");
++  fprintf p "@ --   source:  %s" sourcefile;
++  begin match normalized with
++  | None -> ()
++  | Some b -> fprintf p "@ --   normalized: %b" b
++  end;
++  begin match archi with
++  | None -> ()
++  | Some a -> fprintf p "@ --   Archi instance: %s" a
++  end;
++  fprintf p "@]@ @ "
+diff --git a/export/ExportCtypesLean.ml b/export/ExportCtypesLean.ml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5026e7338e5f6e37c4650d6260cdce4980bbc77f
+--- /dev/null
++++ b/export/ExportCtypesLean.ml
+@@ -0,0 +1,123 @@
++(* *********************************************************************)
++(*                                                                     *)
++(*              The Compcert verified compiler                         *)
++(*                                                                     *)
++(*  Lean output backend for clightgen (CLight-Lean project)            *)
++(*                                                                     *)
++(*  Mirrors ExportCtypes.ml, targeting Lean 4 syntax (CLightLean)      *)
++(*  instead of Coq syntax.                                             *)
++(*                                                                     *)
++(* *********************************************************************)
++
++open Format
++open Camlcoq
++open Ctypes
++open ExportBaseLean
++
++(* Attributes.
++
++   [attr.attr_alignas] is [Option Nat] in CLightLean (`CTypes.lean`'s
++   `structure attr`), not Coq's [option N] -- emit a plain [Nat], never a
++   [%N] suffix. *)
++
++let print_natN p (n : N.t) = fprintf p "%s" (Z.to_string (Z.of_N n))
++
++let attribute p a =
++  if a = noattr then
++    fprintf p "noattr"
++  else
++    fprintf p "{ attr_volatile := %b, attr_alignas := %a }"
++              a.attr_volatile
++              (print_option print_natN) a.attr_alignas
++
++(* Raw int size and signedness *)
++
++let intsize p sz =
++  fprintf p "%s"
++    (match sz with
++     | I8 -> "intsize.I8"
++     | I16 -> "intsize.I16"
++     | I32 -> "intsize.I32"
++     | IBool -> "intsize.IBool")
++
++let signedness p sg =
++  fprintf p "%s"
++    (match sg with
++      | Signed -> "signedness.Signed"
++      | Unsigned -> "signedness.Unsigned")
++
++(* Types.
++
++   CLightLean's [type] inductive (`CTypes.lean`) has only the raw
++   constructors -- there is no [Clightdefs]-style sugar (`tint`/`tptr`/
++   `tvoid`, etc.) in this repo. Coq's [Ctypes.type] embeds its [attr]
++   argument directly in every constructor too (`Tint: intsize ->
++   signedness -> attr -> type`, etc., `cfrontend/Ctypes.v:72-81`) --
++   [ExportCtypes.ml]'s [typ]/[rtyp] split and its `tvolatile`/`talignas`
++   wrapping is purely a *stylistic* choice to print via [Clightdefs.v]'s
++   compact notation (`tint`, `tptr`, ...) rather than a structural fact
++   about [Ctypes.type] itself. Since we have no analogous notation layer,
++   there's nothing to split: just print the raw constructor with its own
++   embedded [attr] argument directly. [Tarray]'s size and [bitfield]'s
++   [pos]/[width] are [Int] here (Coq: [Z]) -- plain integers, no [%Z]
++   suffix. *)
++
++let rec typ p t = rtyp p t
++
++and rtyp p = function
++  | Tvoid -> fprintf p "type.Tvoid"
++  | Ctypes.Tint(sz, sg, a) ->
++      fprintf p "@[<hov 2>(type.Tint@ %a@ %a@ %a)@]" intsize sz signedness sg attribute a
++  | Ctypes.Tlong(sg, a) ->
++      fprintf p "@[<hov 2>(type.Tlong@ %a@ %a)@]" signedness sg attribute a
++  | Ctypes.Tfloat(sz, a) ->
++      fprintf p "@[<hov 2>(type.Tfloat@ %a@ %a)@]" floatsz sz attribute a
++  | Tpointer(t, a) ->
++      fprintf p "@[<hov 2>(type.Tpointer@ %a@ %a)@]" typ t attribute a
++  | Tarray(t, sz, a) ->
++      fprintf p "@[<hov 2>(type.Tarray@ %a@ %a@ %a)@]" typ t coqZ sz attribute a
++  | Tfunction(targs, tres, cc) ->
++      fprintf p "@[<hov 2>(type.Tfunction@ %a@ %a@ %a)@]"
++                typlist targs typ tres callconv cc
++  | Tstruct(id, a) ->
++      fprintf p "@[<hov 2>(type.Tstruct@ %a@ %a)@]" ident id attribute a
++  | Tunion(id, a) ->
++      fprintf p "@[<hov 2>(type.Tunion@ %a@ %a)@]" ident id attribute a
++
++and floatsz p = function
++  | F32 -> fprintf p "floatsize.F32"
++  | F64 -> fprintf p "floatsize.F64"
++
++and typlist p tl =
++  print_list typ p tl
++
++(* Access modes for members of structs or unions *)
++
++let bitfield p = function
++  | Full ->
++      fprintf p "bitfield.Full"
++  | Bits(sz, sg, pos, width) ->
++      fprintf p "@[<hov 2>(bitfield.Bits@ %a@ %a@ %a@ %a)@]"
++                intsize sz signedness sg coqZ pos coqZ width
++
++(* Composite definitions *)
++
++let print_member p = function
++  | Member_plain (id, ty) ->
++      fprintf p "@[<hov 2>(member.Member_plain@ %a@ %a)@]"
++              ident id typ ty
++  | Member_bitfield (id, sz, sg, a, width, pad) ->
++      fprintf p "@[<hov 2>(member.Member_bitfield@ %a@ %a@ %a@ %a@ %a@ %b)@]"
++              ident id
++              intsize sz
++              signedness sg
++              attribute a
++              coqZ width
++              pad
++
++let print_composite_definition p (Composite(id, su, m, a)) =
++  fprintf p "@[<hv 2>(composite_definition.Composite %a %s@ %a@ %a)@]"
++    ident id
++    (match su with Struct -> "struct_or_union.Struct" | Union -> "struct_or_union.Union")
++    (print_list print_member) m
++    attribute a
+diff --git a/export/ExportDriver.ml b/export/ExportDriver.ml
+index 365392c3ff10f7247337f4e5b704e5a0489c0b6d..68b2b94147c3f4c6e81f9a8cb8c0024484b5104e 100644
+--- a/export/ExportDriver.ml
++++ b/export/ExportDriver.ml
+@@ -30,6 +30,14 @@ type export_mode = Mode_Csyntax | Mode_Clight
+ let option_mode = ref Mode_Clight
+ let option_normalize = ref false
+ 
++(* Output target for [-clight] mode: Coq syntax (default, matching
++   existing behavior for VST-style consumers) or Lean 4 syntax (targeting
++   the CLightLean port, https://github.com/.../CLight-Lean). Kept
++   orthogonal to [export_mode] above -- [-csyntax] is untouched by this
++   addition, since a Lean Csyntax exporter is out of scope for now. *)
++type export_target = Target_Coq | Target_Lean
++let option_target = ref Target_Coq
++
+ (* Export the CompCert Csyntax AST *)
+ 
+ let export_csyntax sourcename csyntax ofile =
+@@ -57,10 +65,16 @@ let export_clight sourcename csyntax ofile =
+       fatal_error loc "%a" print_error msg in
+   (* Dump Clight in C syntax if requested *)
+   PrintClight.print_if_2 clight;
+-  (* Print Clight in Coq syntax *)
++  (* Print Clight in Coq or Lean syntax *)
+   let oc = open_out ofile in
+-  ExportClight.print_program (Format.formatter_of_out_channel oc)
+-                             clight sourcename !option_normalize;
++  begin match !option_target with
++  | Target_Coq ->
++      ExportClight.print_program (Format.formatter_of_out_channel oc)
++                                 clight sourcename !option_normalize
++  | Target_Lean ->
++      ExportLeanClight.print_program (Format.formatter_of_out_channel oc)
++                                 clight sourcename !option_normalize
++  end;
+   close_out oc
+ 
+ (* From C source to exported AST *)
+@@ -79,7 +93,10 @@ let compile_c_file sourcename ifile ofile =
+ 
+ let output_filename sourcename  =
+   let prefixname = Filename.remove_extension sourcename in
+-  output_filename_default (prefixname ^ ".v")
++  let ext = match !option_target with
++    | Target_Coq -> ".v"
++    | Target_Lean -> ".lean" in
++  output_filename_default (prefixname ^ ext)
+ 
+ (* Processing of a .c file *)
+ 
+@@ -113,6 +130,8 @@ Recognized source files:
+ Processing options:
+   -clight        Produce Clight AST  [default]
+   -csyntax       Produce Csyntax AST
++  -coq           Produce output in Coq syntax  [default]
++  -lean          Produce output in Lean 4 syntax (for the CLight-Lean port)
+   -normalize     Normalize the generated Clight code w.r.t. loads in expressions
+   -canonical-idents  Use canonical numbers to represent identifiers  (default)
+   -short-idents  Use small, non-canonical numbers to represent identifiers
+@@ -161,6 +180,8 @@ let cmdline_actions =
+  [
+   Exact "-csyntax", Unit (fun () -> option_mode := Mode_Csyntax);
+   Exact "-clight", Unit (fun () -> option_mode := Mode_Clight);
++  Exact "-coq", Unit (fun () -> option_target := Target_Coq);
++  Exact "-lean", Unit (fun () -> option_target := Target_Lean);
+   Exact "-E", Set option_E;
+   Exact "-normalize", Set option_normalize;
+   Exact "-canonical-idents", Set Camlcoq.use_canonical_atoms;
+@@ -207,6 +228,8 @@ try
+   Camlcoq.use_canonical_atoms := true;
+   Frontend.init ();
+   parse_cmdline cmdline_actions;
++  if !option_mode = Mode_Csyntax && !option_target = Target_Lean then
++    fatal_error no_loc "'-lean' is only supported with '-clight' (Lean output for Csyntax ASTs is not implemented)";
+   if !option_o <> None && !num_input_files >= 2 then
+     fatal_error no_loc "Ambiguous '-o' option (multiple source files)";
+   if !num_input_files = 0 then
+diff --git a/export/ExportLeanClight.ml b/export/ExportLeanClight.ml
+new file mode 100644
+index 0000000000000000000000000000000000000000..889dffcb5978be7399bce875c00a5124ca57ac59
+--- /dev/null
++++ b/export/ExportLeanClight.ml
+@@ -0,0 +1,256 @@
++(* *********************************************************************)
++(*                                                                     *)
++(*              The Compcert verified compiler                         *)
++(*                                                                     *)
++(*  Lean output backend for clightgen (CLight-Lean project)            *)
++(*                                                                     *)
++(*  Mirrors ExportClight.ml, targeting Lean 4 syntax (CLightLean's     *)
++(*  `CLight.lean` port) instead of Coq syntax.                         *)
++(*                                                                     *)
++(* *********************************************************************)
++
++(** Export Clight as a Lean 4 file constructing a
++    [CLightLean.program_type CLightLean.function] term. *)
++
++open Format
++open Camlcoq
++open AST
++open! Ctypes
++open Cop
++open Clight
++open ExportBaseLean
++open ExportCtypesLean
++
++(* Expressions *)
++
++let name_unop = function
++  | Onotbool -> "unary_operation.Onotbool"
++  | Onotint -> "unary_operation.Onotint"
++  | Oneg -> "unary_operation.Oneg"
++  | Oabsfloat -> "unary_operation.Oabsfloat"
++
++let name_binop = function
++  | Oadd -> "binary_operation.Oadd"
++  | Osub -> "binary_operation.Osub"
++  | Omul -> "binary_operation.Omul"
++  | Odiv -> "binary_operation.Odiv"
++  | Omod -> "binary_operation.Omod"
++  | Oand -> "binary_operation.Oand"
++  | Oor -> "binary_operation.Oor"
++  | Oxor -> "binary_operation.Oxor"
++  | Oshl -> "binary_operation.Oshl"
++  | Oshr -> "binary_operation.Oshr"
++  | Oeq -> "binary_operation.Oeq"
++  | Cop.One -> "binary_operation.One"
++  | Olt -> "binary_operation.Olt"
++  | Ogt -> "binary_operation.Ogt"
++  | Ole -> "binary_operation.Ole"
++  | Oge -> "binary_operation.Oge"
++
++let rec expr p = function
++  | Evar(id, t) ->
++      fprintf p "(expr.Evar %a %a)" ident id typ t
++  | Etempvar(id, t) ->
++      fprintf p "(expr.Etempvar %a %a)" ident id typ t
++  | Ederef(a1, t) ->
++      fprintf p "@[<hov 2>(expr.Ederef@ %a@ %a)@]" expr a1 typ t
++  | Efield(a1, f, t) ->
++      fprintf p "@[<hov 2>(expr.Efield@ %a@ %a@ %a)@]" expr a1 ident f typ t
++  | Econst_int(n, t) ->
++      fprintf p "(expr.Econst_int %a %a)" coqint n typ t
++  | Econst_float(n, t) ->
++      fprintf p "(expr.Econst_float %a %a)" coqfloat n typ t
++  | Econst_long(n, t) ->
++      fprintf p "(expr.Econst_long %a %a)" coqint64 n typ t
++  | Econst_single(n, t) ->
++      fprintf p "(expr.Econst_single %a %a)" coqsingle n typ t
++  | Eunop(op, a1, t) ->
++      fprintf p "@[<hov 2>(expr.Eunop %s@ %a@ %a)@]"
++         (name_unop op) expr a1 typ t
++  | Eaddrof(a1, t) ->
++      fprintf p "@[<hov 2>(expr.Eaddrof@ %a@ %a)@]" expr a1 typ t
++  | Ebinop(op, a1, a2, t) ->
++      fprintf p "@[<hov 2>(expr.Ebinop %s@ %a@ %a@ %a)@]"
++         (name_binop op) expr a1 expr a2 typ t
++  | Ecast(a1, t) ->
++      fprintf p "@[<hov 2>(expr.Ecast@ %a@ %a)@]" expr a1 typ t
++  | Esizeof(t1, t) ->
++      fprintf p "(expr.Esizeof %a %a)" typ t1 typ t
++  | Ealignof(t1, t) ->
++      fprintf p "(expr.Ealignof %a %a)" typ t1 typ t
++
++(* Statements.
++
++   Unlike Coq's exporter, we do *not* apply the [Ssequence(Sskip,s2) ->
++   s2]/[Sloop(...) -> Swhile] cosmetic simplifications: emitting the raw
++   AST faithfully means a structural diff against the Coq `.v` output for
++   the same source file is a direct node-for-node comparison (see
++   docs/CLIGHTGEN_LEAN_BACKEND_PLAN.md item 6). *)
++
++let rec stmt p = function
++  | Sskip ->
++      fprintf p "statement.Sskip"
++  | Sassign(e1, e2) ->
++      fprintf p "@[<hov 2>(statement.Sassign@ %a@ %a)@]" expr e1 expr e2
++  | Sset(id, e2) ->
++      fprintf p "@[<hov 2>(statement.Sset %a@ %a)@]" ident id expr e2
++  | Scall(optid, e1, el) ->
++      fprintf p "@[<hov 2>(statement.Scall %a@ %a@ %a)@]"
++        (print_option ident) optid expr e1 (print_list expr) el
++  | Sbuiltin(optid, ef, tyl, el) ->
++      fprintf p "@[<hov 2>(statement.Sbuiltin %a@ %a@ %a@ %a)@]"
++        (print_option ident) optid
++        external_function ef
++        typlist tyl
++        (print_list expr) el
++  | Ssequence(s1, s2) ->
++      fprintf p "@[<hv 2>(statement.Ssequence@ %a@ %a)@]" stmt s1 stmt s2
++  | Sifthenelse(e, s1, s2) ->
++      fprintf p "@[<hv 2>(statement.Sifthenelse %a@ %a@ %a)@]" expr e stmt s1 stmt s2
++  | Sloop(s1, s2) ->
++      fprintf p "@[<hv 2>(statement.Sloop@ %a@ %a)@]" stmt s1 stmt s2
++  | Sbreak ->
++      fprintf p "statement.Sbreak"
++  | Scontinue ->
++      fprintf p "statement.Scontinue"
++  | Sswitch(e, cases) ->
++      fprintf p "@[<hv 2>(statement.Sswitch %a@ %a)@]" expr e lblstmts cases
++  | Sreturn e ->
++      fprintf p "@[<hv 2>(statement.Sreturn %a)@]" (print_option expr) e
++  | Slabel(lbl, s1) ->
++      fprintf p "@[<hv 2>(statement.Slabel %a@ %a)@]" ident lbl stmt s1
++  | Sgoto lbl ->
++      fprintf p "(statement.Sgoto %a)" ident lbl
++
++and lblstmts p = function
++  | LSnil ->
++      (fprintf p "labeled_statements.LSnil")
++  | LScons(lbl, s, ls) ->
++      fprintf p "@[<hv 2>(labeled_statements.LScons %a@ %a@ %a)@]"
++              (print_option coqZ) lbl stmt s lblstmts ls
++
++(* Global definitions *)
++
++let print_function p (id, f) =
++  fprintf p "def f%s : function := {@ " (sanitize (extern_atom id));
++  fprintf p "  fn_return := %a,@ " typ f.fn_return;
++  fprintf p "  fn_callconv := %a,@ " callconv f.fn_callconv;
++  fprintf p "  fn_params := %a,@ " (print_list (print_pair ident typ)) f.fn_params;
++  fprintf p "  fn_vars := %a,@ " (print_list (print_pair ident typ)) f.fn_vars;
++  fprintf p "  fn_temps := %a,@ " (print_list (print_pair ident typ)) f.fn_temps;
++  fprintf p "  fn_body :=@ ";
++  stmt p f.fn_body;
++  fprintf p "@ }@ @ "
++
++let print_globdef p (id, gd) =
++  match gd with
++  | Gfun(Ctypes.Internal f) -> print_function p (id, f)
++  | Gfun(Ctypes.External _) -> ()
++  | Gvar v -> print_variable typ p (id, v)
++
++let print_ident_globdef p = function
++  | (id, Gfun(Ctypes.Internal _f)) ->
++      fprintf p "(%a, globdef.Gfun (fundef_type.Internal f%s))" ident id (sanitize (extern_atom id))
++  | (id, Gfun(Ctypes.External(ef, targs, tres, cc))) ->
++      fprintf p "@[<hov 2>(%a,@ @[<hov 2>globdef.Gfun (fundef_type.External %a@ %a@ %a@ %a))@]@]"
++        ident id external_function ef typlist targs typ tres callconv cc
++  | (id, Gvar _v) ->
++      fprintf p "(%a, globdef.Gvar v%s)" ident id (sanitize (extern_atom id))
++
++(* The prologue *)
++
++let prologue = "\
++import CLightLean.CLight\n"
++
++(* Naming the compiler-generated temporaries occurring in the program
++   (identical in structure to [ExportClight.ml]'s naming pass -- reuses
++   the same [temp_names] table from [ExportBaseLean]). *)
++
++let rec name_expr = function
++  | Evar(_id, _t) -> ()
++  | Etempvar(id, _t) -> name_temporary id
++  | Ederef(a1, _t) -> name_expr a1
++  | Efield(a1, _f, _t) -> name_expr a1
++  | Econst_int(_n, _t) -> ()
++  | Econst_float(_n, _t) -> ()
++  | Econst_long(_n, _t) -> ()
++  | Econst_single(_n, _t) -> ()
++  | Eunop(_op, a1, _t) -> name_expr a1
++  | Eaddrof(a1, _t) -> name_expr a1
++  | Ebinop(_op, a1, a2, _t) -> name_expr a1; name_expr a2
++  | Ecast(a1, _t) -> name_expr a1
++  | Esizeof(_t1, _t) -> ()
++  | Ealignof(_t1, _t) -> ()
++
++let rec name_stmt = function
++  | Sskip -> ()
++  | Sassign(e1, e2) -> name_expr e1; name_expr e2
++  | Sset(id, e2) -> name_temporary id; name_expr e2
++  | Scall(optid, e1, el) ->
++      name_opt_temporary optid; name_expr e1; List.iter name_expr el
++  | Sbuiltin(optid, _ef, _tyl, el) ->
++      name_opt_temporary optid; List.iter name_expr el
++  | Ssequence(s1, s2) -> name_stmt s1; name_stmt s2
++  | Sifthenelse(e, s1, s2) -> name_expr e; name_stmt s1; name_stmt s2
++  | Sloop(s1, s2) -> name_stmt s1; name_stmt s2
++  | Sbreak -> ()
++  | Scontinue -> ()
++  | Sswitch(e, cases) -> name_expr e; name_lblstmts cases
++  | Sreturn (Some e) -> name_expr e
++  | Sreturn None -> ()
++  | Slabel(_lbl, s1) -> name_stmt s1
++  | Sgoto _lbl -> ()
++
++and name_lblstmts = function
++  | LSnil -> ()
++  | LScons(_lbl, s, ls) -> name_stmt s; name_lblstmts ls
++
++let name_function f =
++  List.iter (fun (id, _ty) -> name_temporary id) f.fn_temps;
++  name_stmt f.fn_body
++
++let name_globdef (_id, g) =
++  match g with
++  | Gfun(Ctypes.Internal f) -> name_function f
++  | _ -> ()
++
++let name_program p =
++  List.iter name_globdef p.Ctypes.prog_defs
++
++(* [Archi] instance selection: pin the specific instance matching how
++   clightgen was configured (mirrors `Configuration`/`Archi` on the OCaml
++   side), rather than leaving it generic -- the generated AST is
++   target-specific anyway (compiled for a specific model), and every
++   `Std.TreeMap`-backed proof obligation the file relies on (via
++   [make_program!]'s `by decide`) needs a *concrete* instance to reduce
++   against. CLightLean's `Archi.lean` only models two instances,
++   [x86_64]/[x86_32] -- this backend is scoped to x86 targets for now,
++   matching this repo's current [Archi.lean] coverage. *)
++let archi_instance_name () =
++  if Archi.ptr64 then "x86_64" else "x86_32"
++
++(* All together *)
++
++let print_program p prog sourcefile normalized =
++  Hashtbl.clear temp_names;
++  name_program prog;
++  fprintf p "@[<v 0>";
++  fprintf p "%s" prologue;
++  fprintf p "@ ";
++  fprintf p "attribute [instance] %s@ @ " (archi_instance_name ());
++  print_gen_info ~sourcefile ~normalized ~archi:(archi_instance_name ()) p;
++  define_idents p;
++  List.iter (print_globdef p) prog.Ctypes.prog_defs;
++  fprintf p "def composites : List composite_definition :=@ ";
++  print_list print_composite_definition p prog.prog_types;
++  fprintf p "@ @ ";
++  fprintf p "def global_definitions : List (ident × globdef (fundef_type function) type) :=@ ";
++  print_list print_ident_globdef p prog.Ctypes.prog_defs;
++  fprintf p "@ @ ";
++  fprintf p "def public_idents : List ident :=@ ";
++  print_list ident p prog.Ctypes.prog_public;
++  fprintf p "@ @ ";
++  fprintf p "def prog : program_type function :=@ ";
++  fprintf p "  make_program! function composites global_definitions public_idents %a@ @ "
++            ident prog.Ctypes.prog_main;
++  fprintf p "@]@."

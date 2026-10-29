@@ -1,0 +1,32 @@
+name = "CLight-Lean"
+version = "0.1.0"
+defaultTargets = ["clight-lean"]
+
+[[lean_lib]]
+name = "CLightLean"
+moreLeanArgs = ["-DautoImplicit=false"]
+
+[[lean_lib]]
+name = "Test"
+moreLeanArgs = ["-DautoImplicit=false"]
+
+[[lean_exe]]
+name = "clight-lean"
+root = "Main"
+
+# Add this block:
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4.git"
+# Pinned to the exact commit FloatLib's own manifest resolves, so both
+# projects build against the identical mathlib revision.
+rev = "5ed2965256430c3649e86755f9576b54eca72435"
+
+# Pinned to the last upstream revision whose toolchain (v4.34.0) and mathlib
+# pin (the commit FloatLib's own manifest resolves at this rev) match ours.
+# Replaces the previous ../FloatLib path dependency so fresh clones and the
+# CSmith campaign container are self-contained.
+[[require]]
+name = "floatlib"
+git = "https://github.com/lean-dojo/FloatLib.git"
+rev = "21865090ba7c1cd39381c198d5cdd8fb1d8728a3"

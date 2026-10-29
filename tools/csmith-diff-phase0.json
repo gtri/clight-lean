@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "phase": 0,
+  "status": "source-input differential harness and deterministic fixed-checksum CSmith corpus mode implemented",
+  "sibling_checkouts": {
+    "csmith": "../csmith",
+    "compcert": "../CompCert",
+    "ccomp": "../CompCert/ccomp",
+    "clightgen": "../CompCert/clightgen"
+  },
+  "initial_target": {
+    "native_abi": "CompCert x86-64 Linux",
+    "lean_architecture": "x86_64"
+  },
+  "execution_timeout_policy": {
+    "timeout_seconds": 30,
+    "termination_signal": "TERM",
+    "kill_after_seconds": 1,
+    "native_noncompletion": "retain timeout/signal outcomes and do not run Lean; ordinary native exits, including nonzero exits, continue to Lean export"
+  },
+  "generated_program_elaboration": {
+    "max_rec_depth": 4096,
+    "scope": "Applied only to the isolated GeneratedCases Lean library. maxHeartbeats remains Lean's default."
+  },
+  "preprocessing": {
+    "owned_include_directories": [
+      "Test/CSmithSeeds"
+    ],
+    "macro_definitions": [],
+    "language_standard": null,
+    "require_identical_native_and_export_inputs": true
+  },
+  "owned_checksum_bootstrap": {
+    "status": "established fixed-signature bootstrap workaround; not source-level varargs support",
+    "source_unit": "Test/CSmithSeeds/minimal_checksum.c",
+    "source_declaration_header": "Test/CSmithSeeds/csmith_checksum_runtime.h",
+    "imported_declaration": "int csmith_checksum_print(unsigned int checksum);",
+    "native_companion_implementation": "Test/CSmithSeeds/csmith_checksum_runtime.c",
+    "native_link_inputs": [
+      "Test/CSmithSeeds/minimal_checksum.c",
+      "Test/CSmithSeeds/csmith_checksum_runtime.c"
+    ],
+    "clightgen_input": "Test/CSmithSeeds/minimal_checksum.c",
+    "excluded_from_clightgen": [
+      "Test/CSmithSeeds/csmith_checksum_runtime.c"
+    ],
+    "expected_generated_external": {
+      "name": "csmith_checksum_print",
+      "signature_arguments": [
+        "xtype.Xint"
+      ],
+      "call_statement": "Scall with exactly one argument"
+    },
+    "future_varargs_design": "docs/VARARGS_SEMANTICS_AND_IRIS_FUTURE.md"
+  },
+  "generator": {
+    "profile": "tools/csmith-profile-fixed-checksum.json",
+    "runner": "tools/csmith_corpus.py",
+    "source_policy": "Use the committed restrictive fixed-checksum profile with bounded CSmith integer, aggregate, pointer, long-long, and strict floating-point generation; volatile accesses remain disabled. The corpus runner retains raw and transformed sources and invokes the source-input harness."
+  },
+  "workspace_layout": {
+    "generated_case_modules": "GeneratedCases",
+    "case_build_output": ".csmith-diff-build",
+    "retained_artifacts": "artifacts/csmith"
+  }
+}
